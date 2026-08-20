@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Compile
+        run: make build
+
+  create-release:
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      release_created: ${{ steps.create_release.outputs.release_created }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Calculate version
+        id: version
+        run: echo "version=$(make -s version)" >> "$GITHUB_OUTPUT"
+
+      - name: Create draft release
+        id: create_release
+        run: |
+          gh release create "${{ steps.version.outputs.version }}" \
+            --title "Release ${{ steps.version.outputs.version }}" \
+            --draft \
+            --notes "macup ${{ steps.version.outputs.version }}" \
+            --target ${{ github.sha }}
+          echo "release_created=true" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  app:
+    needs: create-release
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build and package
+        run: make zip VERSION=${{ needs.create-release.outputs.version }}
+
+      - name: Upload release asset
+        run: gh release upload "${{ needs.create-release.outputs.version }}" macup.zip --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  publish:
+    needs: [create-release, app]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Publish release
+        run: gh release edit "${{ needs.create-release.outputs.version }}" --draft=false
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  cleanup-on-failure:
+    needs: [create-release, app, publish]
+    if: always() && (needs.app.result == 'failure' || needs.publish.result == 'failure') && needs.create-release.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete draft release
+        run: gh release delete "${{ needs.create-release.outputs.version }}" --yes
+        env:
+          GH_TOKEN: ${{ github.token }}
